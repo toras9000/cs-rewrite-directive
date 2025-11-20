@@ -1,0 +1,120 @@
+#!/usr/bin/env -S dotnet run --file
+#:package Lestaly.General@0.112.0
+#:package Kokuban@0.2.0
+using Kokuban;
+using Lestaly;
+
+var settings = new
+{
+    Shebang = "#!/usr/bin/env -S dotnet run --file",
+
+    RewritExtension = ".cs1",
+
+    SearchExtension = ".csx",
+};
+
+return await Paved.ProceedAsync(async () =>
+{
+    using var signal = new SignalCancellationPeriod();
+
+    Console.WriteLine("Rewrite dotnet-script directives");
+    while (true)
+    {
+        Console.Write(">");
+        var input = Console.ReadLine()?.Trim().Unquote().Trim();
+        if (input == null) break;
+        if (input.IsWhiteSpace()) continue;
+
+        try
+        {
+            if (input.AsDirectoryInfo() is var dir && dir.Exists)
+            {
+                Console.WriteLine($"Search {settings.SearchExtension} and rewrite all");
+                Console.WriteLine($"To continue, please enter yes.");
+                Console.Write(">");
+                if (Console.ReadLine() != "yes") continue;
+                foreach (var file in dir.GetFiles($"*{settings.SearchExtension}", SearchOption.AllDirectories))
+                {
+                    await rewriteScriptAsync(file, signal.Token);
+                }
+            }
+            else if (input.AsFileInfo() is var file && file.Exists)
+            {
+                await rewriteScriptAsync(file, signal.Token);
+            }
+            else
+            {
+                Console.WriteLine(Chalk.Yellow["No file"]);
+            }
+        }
+        catch (PavedMessageException ex)
+        {
+            var chalk = ex.Kind switch { PavedMessageKind.Information => Chalk.Gray, PavedMessageKind.Warning => Chalk.Yellow, _ => Chalk.Red, };
+            Console.WriteLine(chalk[ex.Message]);
+        }
+        Console.WriteLine();
+    }
+});
+
+async ValueTask rewriteScriptAsync(FileInfo file, CancellationToken cancelToken)
+{
+    Console.WriteLine($"File: {file.FullName}");
+    var rewriteFile = file.GetAnotherExtension(settings.RewritExtension);
+    if (rewriteFile.Exists)
+    {
+        Console.WriteLine(Chalk.Yellow[".. Skip: Already exists .cs1 file"]);
+        return;
+    }
+
+    var scriptLines = await file.ReadAllLinesAsync(cancelToken);
+    var hasShebang = false;
+    var hasDirective = false;
+    for (var i = 0; i < scriptLines.Length; i++)
+    {
+        var line = scriptLines[i];
+        if (i == 0 && line.StartsWith("#!"))
+        {
+            scriptLines[i] = settings.Shebang;
+            hasShebang = true;
+            continue;
+        }
+        if (line.Match(@"^\s*#\s*r\s+""nuget\s*:\s*(?<name>[a-zA-Z0-9\-\._]+)\s*(?:,| )\s*(?<version>.+)\s*""") is var package && package.Success)
+        {
+            var name = package.Groups["name"].Value;
+            var version = package.Groups["version"].Value;
+            scriptLines[i] = @$"#:package {name}@{version}";
+            hasDirective = true;
+            continue;
+        }
+        if (line.Match(@"^\s*#\s*nullable\s+(?<value>.+)\s*") is var nullable && nullable.Success)
+        {
+            var value = nullable.Groups["value"].Value;
+            scriptLines[i] = value.IsWhite() || value == "enable" ? default! : @$"#:property Nullable={value}";
+            hasDirective = true;
+            continue;
+        }
+        if (line.Match(@"^\s*#\s*r\s+""sdk\s*:\s*(?<name>.+)\s*""") is var sdk && sdk.Success)
+        {
+            var name = sdk.Groups["name"].Value;
+            scriptLines[i] = @$"#:sdk {name}";
+            hasDirective = true;
+            continue;
+        }
+
+        break;
+    }
+
+    if (hasDirective)
+    {
+        var rewriteLines = scriptLines.Where(line => line != null);
+        if (!hasShebang) rewriteLines = rewriteLines.Prepend(settings.Shebang);
+        await file.WriteAllLinesAsync(rewriteLines, cancelToken);
+        file.Rename(rewriteFile.FullName);
+        Console.WriteLine(Chalk.Green[$".. Rewrite to {rewriteFile.Name}"]);
+    }
+    else
+    {
+        Console.WriteLine(Chalk.Gray[".. Not script"]);
+    }
+
+}
