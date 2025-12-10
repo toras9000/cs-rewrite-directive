@@ -29,10 +29,6 @@ return await Paved.ProceedAsync(async () =>
         {
             if (input.AsDirectoryInfo() is var dir && dir.Exists)
             {
-                Console.WriteLine($"Search {settings.SearchExtension} and rewrite all");
-                Console.WriteLine($"To continue, please enter yes.");
-                Console.Write(">");
-                if (Console.ReadLine() != "yes") continue;
                 foreach (var file in dir.GetFiles($"*{settings.SearchExtension}", SearchOption.AllDirectories))
                 {
                     await rewriteScriptAsync(file, signal.Token);
