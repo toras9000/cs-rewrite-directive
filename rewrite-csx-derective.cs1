@@ -1,16 +1,18 @@
 #!/usr/bin/env -S dotnet run --file
 #:package Lestaly.General@0.114.0
 #:package Kokuban@0.2.0
+using System.Text.RegularExpressions;
 using Kokuban;
 using Lestaly;
 
 var settings = new
 {
-    Shebang = "#!/usr/bin/env -S dotnet run --file",
-
-    RewritExtension = ".cs1",
-
-    SearchExtension = ".csx",
+    RewriteSettings = new RewriteSettings(
+        SearchExtension: ".csx",
+        RewriteExtension: ".cs1",
+        Shebang: "#!/usr/bin/env -S dotnet run --file",
+        RefFilePackage: "RefFile@0.2.0"
+    ),
 };
 
 return await Paved.ProceedAsync(async () =>
@@ -29,7 +31,7 @@ return await Paved.ProceedAsync(async () =>
         {
             if (input.AsDirectoryInfo() is var dir && dir.Exists)
             {
-                foreach (var file in dir.GetFiles($"*{settings.SearchExtension}", SearchOption.AllDirectories))
+                foreach (var file in dir.GetFiles($"*{settings.RewriteSettings.SearchExtension}", SearchOption.AllDirectories))
                 {
                     await rewriteScriptAsync(file, signal.Token);
                 }
@@ -55,7 +57,7 @@ return await Paved.ProceedAsync(async () =>
 async ValueTask rewriteScriptAsync(FileInfo file, CancellationToken cancelToken)
 {
     Console.WriteLine($"File: {file.FullName}");
-    var rewriteFile = file.GetAnotherExtension(settings.RewritExtension);
+    var rewriteFile = file.GetAnotherExtension(settings.RewriteSettings.RewriteExtension);
     if (rewriteFile.Exists)
     {
         Console.WriteLine(Chalk.Yellow[".. Skip: Already exists .cs1 file"]);
@@ -63,54 +65,75 @@ async ValueTask rewriteScriptAsync(FileInfo file, CancellationToken cancelToken)
     }
 
     var scriptLines = await file.ReadAllLinesAsync(cancelToken);
-    var hasShebang = false;
-    var hasUpdate = false;
-    for (var i = 0; i < scriptLines.Length; i++)
+    var rewriteLines = convertScriptSource(scriptLines, settings.RewriteSettings);
+
+    await file.WriteAllLinesAsync(rewriteLines, cancelToken);
+    file.Rename(rewriteFile.FullName);
+    Console.WriteLine(Chalk.Green[$".. Rewrite to {rewriteFile.Name}"]);
+}
+
+IEnumerable<string> convertScriptSource(IEnumerable<string> source, RewriteSettings settings)
+{
+    var loadFiles = new List<string>();
+    var usingBlock = ScanState.None;
+    var first = true;
+    foreach (var line in source)
     {
-        var line = scriptLines[i];
-        if (i == 0 && line.StartsWith("#!"))
+        if (first)
         {
-            scriptLines[i] = settings.Shebang;
-            hasUpdate = hasShebang = true;
-            continue;
+            first = false;
+            yield return settings.Shebang;
+            if (line.StartsWith("#!")) continue;
         }
+
         if (line.Match(@"^\s*#\s*r\s+""nuget\s*:\s*(?<name>[a-zA-Z0-9\-\._]+)\s*(?:,| )\s*(?<version>.+)\s*""") is var package && package.Success)
         {
             var name = package.Groups["name"].Value;
             var version = package.Groups["version"].Value;
-            scriptLines[i] = @$"#:package {name}@{version}";
-            hasUpdate = true;
+            yield return @$"#:package {name}@{version}";
             continue;
         }
         if (line.Match(@"^\s*#\s*nullable\s+(?<value>.+)\s*") is var nullable && nullable.Success)
         {
             var value = nullable.Groups["value"].Value;
-            scriptLines[i] = value.IsWhite() || value == "enable" ? default! : @$"#:property Nullable={value}";
-            hasUpdate = true;
+            if (value.IsNotWhite() && value != "enable") yield return @$"#:property Nullable={value}";
             continue;
         }
         if (line.Match(@"^\s*#\s*r\s+""sdk\s*:\s*(?<name>.+)\s*""") is var sdk && sdk.Success)
         {
             var name = sdk.Groups["name"].Value;
-            scriptLines[i] = @$"#:sdk {name}";
-            hasUpdate = true;
+            yield return @$"#:sdk {name}";
+            continue;
+        }
+        if (line.Match(@"^\s*#\s*load\s+""(?<path>.+)""") is var load && load.Success)
+        {
+            var path = load.Groups["path"].Value;
+            if (loadFiles.Count <= 0) yield return $"#:package {settings.RefFilePackage}";
+            if (usingBlock < ScanState.Ended) loadFiles.Add(path);
             continue;
         }
 
-        break;
-    }
+        if (usingBlock == ScanState.None)
+        {
+            if (line.RoughStartsAny(["using"])) usingBlock = ScanState.Started;
+        }
+        else if (usingBlock == ScanState.Started)
+        {
+            if (!line.RoughStartsAny(["using"]))
+            {
+                usingBlock = ScanState.Ended;
+                foreach (var path in loadFiles)
+                {
+                    var refPath = path;
+                    if (path.EndsWith(settings.SearchExtension)) refPath = $"{path[..^settings.SearchExtension.Length]}{settings.RewriteExtension}";
+                    yield return @$"[assembly: RefFile(""{refPath}"")]";
+                }
+            }
+        }
 
-    if (hasUpdate)
-    {
-        var rewriteLines = scriptLines.Where(line => line != null);
-        if (!hasShebang) rewriteLines = rewriteLines.Prepend(settings.Shebang);
-        await file.WriteAllLinesAsync(rewriteLines, cancelToken);
-        file.Rename(rewriteFile.FullName);
-        Console.WriteLine(Chalk.Green[$".. Rewrite to {rewriteFile.Name}"]);
+        yield return line;
     }
-    else
-    {
-        Console.WriteLine(Chalk.Gray[".. Not script"]);
-    }
-
 }
+
+record RewriteSettings(string SearchExtension, string RewriteExtension, string Shebang, string RefFilePackage);
+enum ScanState { None, Started, Ended, }
