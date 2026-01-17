@@ -130,6 +130,21 @@ IEnumerable<string> convertScriptSource(IEnumerable<string> source, RewriteSetti
                 }
             }
         }
+        if (line.Match(@"(?<=(?:^|=>|[=;\{\}])\s*)(?<!\.)(?<method>WriteLine|Write|ReadLine|ReadKey|Clear)(?=\s*\()") is var console && console.Success)
+        {
+            var method = console.Groups["method"].Value;
+            var before = line[..console.Index];
+            var after = line[(console.Index + console.Length)..];
+            yield return $"{before}Console.{method}{after}";
+            continue;
+        }
+        if (line.Match(@"\bArgs\.") is var arg && arg.Success)
+        {
+            var before = line[..arg.Index];
+            var after = line[(arg.Index + arg.Length)..];
+            yield return $"{before}args.{after}";
+            continue;
+        }
 
         yield return line;
     }
